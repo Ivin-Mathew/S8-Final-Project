@@ -71,6 +71,7 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
     private var displayRotationHelper: DisplayRotationHelper? = null
     private var currentAnchor: Anchor? = null
     private var shouldCapture = false
+    private var captureDir: String? = null
     private var captureResult: MethodChannel.Result? = null
     private val methodChannel: MethodChannel
 
@@ -105,6 +106,8 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
             "captureFrame" -> {
                 shouldCapture = true
                 captureResult = result
+                val args = call.arguments as? Map<String, Any>
+                captureDir = args?.get("dirPath") as? String
             }
             else -> result.notImplemented()
         }
@@ -210,16 +213,17 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
         shouldCapture = false
         val result = captureResult ?: return
         captureResult = null
+        val dir = captureDir
 
         try {
             // 1. Capture RGB
             val image = frame.acquireCameraImage()
-            val imagePath = saveImage(image, "rgb_${System.currentTimeMillis()}.jpg")
+            val imagePath = saveImage(image, "rgb_${System.currentTimeMillis()}.jpg", dir)
             image.close()
 
             // 2. Capture Depth
             val depthImage = frame.acquireRawDepthImage16Bits()
-            val depthPath = saveDepthImage(depthImage, "depth_${System.currentTimeMillis()}.bin")
+            val depthPath = saveDepthImage(depthImage, "depth_${System.currentTimeMillis()}.bin", dir)
             depthImage.close()
 
             // 3. Calculate Pose
@@ -253,7 +257,7 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
         }
     }
 
-    private fun saveImage(image: Image, filename: String): String {
+    private fun saveImage(image: Image, filename: String, dirPath: String?): String {
         val yuvImage = YuvImage(
             YUV_420_888toNV21(image),
             ImageFormat.NV21,
@@ -261,18 +265,22 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
             image.height,
             null
         )
-        val file = File(context.cacheDir, filename)
+        val dir = if (dirPath != null) File(dirPath) else context.cacheDir
+        if (!dir.exists()) dir.mkdirs()
+        val file = File(dir, filename)
         val stream = FileOutputStream(file)
         yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 100, stream)
         stream.close()
         return file.absolutePath
     }
 
-    private fun saveDepthImage(image: Image, filename: String): String {
+    private fun saveDepthImage(image: Image, filename: String, dirPath: String?): String {
         val buffer = image.planes[0].buffer
         val bytes = ByteArray(buffer.remaining())
         buffer.get(bytes)
-        val file = File(context.cacheDir, filename)
+        val dir = if (dirPath != null) File(dirPath) else context.cacheDir
+        if (!dir.exists()) dir.mkdirs()
+        val file = File(dir, filename)
         FileOutputStream(file).use { it.write(bytes) }
         return file.absolutePath
     }

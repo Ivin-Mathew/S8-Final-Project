@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 import 'dart:convert';
 
@@ -21,11 +22,23 @@ class _ArCaptureScreenState extends State<ArCaptureScreen> {
   List<double>? _pose;
   bool _hasPermissions = false;
   final List<Map<String, dynamic>> _captures = [];
+  Directory? _sessionDirectory;
 
   @override
   void initState() {
     super.initState();
     _checkPermissions();
+    _createSessionDirectory();
+  }
+
+  Future<void> _createSessionDirectory() async {
+    final appDir = await getApplicationDocumentsDirectory();
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final dir = Directory('${appDir.path}/captures/session_$timestamp');
+    await dir.create(recursive: true);
+    setState(() {
+      _sessionDirectory = dir;
+    });
   }
 
   Future<void> _checkPermissions() async {
@@ -57,12 +70,15 @@ class _ArCaptureScreenState extends State<ArCaptureScreen> {
   }
 
   Future<void> _capture() async {
+    if (_sessionDirectory == null) return;
     try {
       setState(() {
         _status = 'Capturing...';
       });
       
-      final Map<dynamic, dynamic> result = await _channel.invokeMethod('captureFrame');
+      final Map<dynamic, dynamic> result = await _channel.invokeMethod('captureFrame', {
+        'dirPath': _sessionDirectory!.path,
+      });
       
       final imagePath = result['imagePath'] as String?;
       final depthPath = result['depthPath'] as String?;
@@ -94,11 +110,9 @@ class _ArCaptureScreenState extends State<ArCaptureScreen> {
   }
 
   Future<void> _saveCaptures() async {
-    if (_captures.isEmpty) return;
+    if (_captures.isEmpty || _sessionDirectory == null) return;
     try {
-      final firstImage = File(_captures.first['imagePath']);
-      final dir = firstImage.parent;
-      final file = File('${dir.path}/captures.json');
+      final file = File('${_sessionDirectory!.path}/captures.json');
       await file.writeAsString(jsonEncode(_captures));
       print('Saved ${_captures.length} captures to ${file.path}');
     } catch (e) {
