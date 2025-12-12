@@ -67,6 +67,7 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
     private val surfaceView: GLSurfaceView = GLSurfaceView(context)
     private var session: Session? = null
     private val backgroundRenderer = BackgroundRenderer()
+    private val objectRenderer = SimpleObjectRenderer()
     private var displayRotationHelper: DisplayRotationHelper? = null
     private var currentAnchor: Anchor? = null
     private var shouldCapture = false
@@ -120,6 +121,7 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f)
         backgroundRenderer.createOnGlThread(context)
+        objectRenderer.createOnGlThread()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -156,6 +158,18 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
             session?.setCameraTextureName(backgroundRenderer.textureId)
             val frame = session?.update() ?: return
             backgroundRenderer.draw(frame)
+
+            val camera = frame.camera
+            val projectionMatrix = FloatArray(16)
+            camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f)
+            val viewMatrix = FloatArray(16)
+            camera.getViewMatrix(viewMatrix, 0)
+
+            if (currentAnchor != null) {
+                val anchorMatrix = FloatArray(16)
+                currentAnchor!!.pose.toMatrix(anchorMatrix, 0)
+                objectRenderer.draw(viewMatrix, projectionMatrix, anchorMatrix)
+            }
 
             if (shouldPlaceAnchor) {
                 handlePlaceAnchor(frame)
@@ -419,5 +433,106 @@ class DisplayRotationHelper(private val context: Context) : DisplayManager.Displ
     override fun onDisplayRemoved(displayId: Int) {}
     override fun onDisplayChanged(displayId: Int) {
         viewportChanged = true
+    }
+}
+
+class SimpleObjectRenderer {
+    private var program: Int = 0
+    private var positionParam: Int = 0
+    private var mvpMatrixParam: Int = 0
+    private var colorParam: Int = 0
+    private val vertexBuffer: FloatBuffer
+    private val indexBuffer: ByteBuffer
+
+    // Simple box vertices (x, y, z)
+    // 1cm x 20cm x 1cm stick standing on the anchor
+    private val VERTICES = floatArrayOf(
+        // Bottom vertices
+        -0.005f, 0.0f, -0.005f,
+         0.005f, 0.0f, -0.005f,
+         0.005f, 0.0f,  0.005f,
+        -0.005f, 0.0f,  0.005f,
+        // Top vertices
+        -0.005f, 0.2f, -0.005f,
+         0.005f, 0.2f, -0.005f,
+         0.005f, 0.2f,  0.005f,
+        -0.005f, 0.2f,  0.005f
+    )
+
+    private val INDICES = byteArrayOf(
+        0, 1, 2, 0, 2, 3, // Bottom
+        4, 5, 6, 4, 6, 7, // Top
+        0, 1, 5, 0, 5, 4, // Front
+        1, 2, 6, 1, 6, 5, // Right
+        2, 3, 7, 2, 7, 6, // Back
+        3, 0, 4, 3, 4, 7  // Left
+    )
+
+    init {
+        val vbb = ByteBuffer.allocateDirect(VERTICES.size * 4)
+        vbb.order(ByteOrder.nativeOrder())
+        vertexBuffer = vbb.asFloatBuffer()
+        vertexBuffer.put(VERTICES)
+        vertexBuffer.position(0)
+
+        indexBuffer = ByteBuffer.allocateDirect(INDICES.size)
+        indexBuffer.put(INDICES)
+        indexBuffer.position(0)
+    }
+
+    fun createOnGlThread() {
+        val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, VERTEX_SHADER)
+        val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, FRAGMENT_SHADER)
+        program = GLES20.glCreateProgram()
+        GLES20.glAttachShader(program, vertexShader)
+        GLES20.glAttachShader(program, fragmentShader)
+        GLES20.glLinkProgram(program)
+        
+        positionParam = GLES20.glGetAttribLocation(program, "a_Position")
+        mvpMatrixParam = GLES20.glGetUniformLocation(program, "u_MVP")
+        colorParam = GLES20.glGetUniformLocation(program, "u_Color")
+    }
+
+    fun draw(viewMatrix: FloatArray, projectionMatrix: FloatArray, modelMatrix: FloatArray) {
+        GLES20.glUseProgram(program)
+
+        val mvpMatrix = FloatArray(16)
+        val vpMatrix = FloatArray(16)
+        android.opengl.Matrix.multiplyMM(vpMatrix, 0, projectionMatrix, 0, viewMatrix, 0)
+        android.opengl.Matrix.multiplyMM(mvpMatrix, 0, vpMatrix, 0, modelMatrix, 0)
+
+        GLES20.glUniformMatrix4fv(mvpMatrixParam, 1, false, mvpMatrix, 0)
+        
+        // Green color
+        GLES20.glUniform4f(colorParam, 0.0f, 1.0f, 0.0f, 1.0f)
+
+        GLES20.glVertexAttribPointer(positionParam, 3, GLES20.GL_FLOAT, false, 0, vertexBuffer)
+        GLES20.glEnableVertexAttribArray(positionParam)
+
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, INDICES.size, GLES20.GL_UNSIGNED_BYTE, indexBuffer)
+        
+        GLES20.glDisableVertexAttribArray(positionParam)
+    }
+
+    private fun loadShader(type: Int, shaderCode: String): Int {
+        val shader = GLES20.glCreateShader(type)
+        GLES20.glShaderSource(shader, shaderCode)
+        GLES20.glCompileShader(shader)
+        return shader
+    }
+
+    companion object {
+        private const val VERTEX_SHADER =
+            "uniform mat4 u_MVP;" +
+            "attribute vec4 a_Position;" +
+            "void main() {" +
+            "  gl_Position = u_MVP * a_Position;" +
+            "}"
+        private const val FRAGMENT_SHADER =
+            "precision mediump float;" +
+            "uniform vec4 u_Color;" +
+            "void main() {" +
+            "  gl_FragColor = u_Color;" +
+            "}"
     }
 }

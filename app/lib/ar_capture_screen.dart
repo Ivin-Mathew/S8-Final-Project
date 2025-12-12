@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'dart:io';
+import 'dart:convert';
 
 class ArCaptureScreen extends StatefulWidget {
   const ArCaptureScreen({super.key});
@@ -18,6 +20,7 @@ class _ArCaptureScreenState extends State<ArCaptureScreen> {
   String? _depthPath;
   List<double>? _pose;
   bool _hasPermissions = false;
+  final List<Map<String, dynamic>> _captures = [];
 
   @override
   void initState() {
@@ -61,17 +64,45 @@ class _ArCaptureScreenState extends State<ArCaptureScreen> {
       
       final Map<dynamic, dynamic> result = await _channel.invokeMethod('captureFrame');
       
+      final imagePath = result['imagePath'] as String?;
+      final depthPath = result['depthPath'] as String?;
+      final poseList = result['relativePose'] as List<dynamic>?;
+      final pose = poseList?.cast<double>();
+
+      if (imagePath != null && depthPath != null && pose != null) {
+        final captureData = {
+          'imagePath': imagePath,
+          'depthPath': depthPath,
+          'relativePose': pose,
+          'timestamp': DateTime.now().toIso8601String(),
+        };
+        _captures.add(captureData);
+        await _saveCaptures();
+      }
+
       setState(() {
-        _imagePath = result['imagePath'] as String?;
-        _depthPath = result['depthPath'] as String?;
-        final poseList = result['relativePose'] as List<dynamic>?;
-        _pose = poseList?.cast<double>();
-        _status = 'Capture Success';
+        _imagePath = imagePath;
+        _depthPath = depthPath;
+        _pose = pose;
+        _status = 'Capture Success (${_captures.length} saved)';
       });
     } on PlatformException catch (e) {
       setState(() {
         _status = 'Capture Error: ${e.message}';
       });
+    }
+  }
+
+  Future<void> _saveCaptures() async {
+    if (_captures.isEmpty) return;
+    try {
+      final firstImage = File(_captures.first['imagePath']);
+      final dir = firstImage.parent;
+      final file = File('${dir.path}/captures.json');
+      await file.writeAsString(jsonEncode(_captures));
+      print('Saved ${_captures.length} captures to ${file.path}');
+    } catch (e) {
+      print('Error saving captures: $e');
     }
   }
 
