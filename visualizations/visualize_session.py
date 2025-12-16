@@ -153,22 +153,18 @@ def process_session(session_path):
         combined_pcd += pcd
         print(f"Processed frame {i+1}/{len(captures)}")
 
-    # Visualization
-    if combined_pcd.is_empty():
-        print("No points to visualize.")
-        return
+        # Visualization for individual frame
+        print(f"Visualizing frame {i+1}...")
+        
+        # Add a coordinate frame for the Anchor (Origin)
+        axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2, origin=[0, 0, 0])
+        
+        # Visualize individual frame
+        o3d.visualization.draw_geometries_with_editing([pcd, axis], 
+                                          window_name=f"Frame {i+1} - Shift+Click to pick points",
+                                          width=1024, height=768)
 
-    print("Visualizing combined point cloud...")
-    
-    # Add a coordinate frame for the Anchor (Origin)
-    axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2, origin=[0, 0, 0])
-    
-    # Downsample for performance if needed
-    combined_pcd = combined_pcd.voxel_down_sample(voxel_size=0.005)
-    
-    o3d.visualization.draw_geometries([combined_pcd, axis], 
-                                      window_name="AR Session Reconstruction",
-                                      width=1024, height=768)
+    print("Finished processing all frames.")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

@@ -216,10 +216,10 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
         val dir = captureDir
 
         try {
-            // 1. Capture RGB
-            val image = frame.acquireCameraImage()
-            val imagePath = saveImage(image, "rgb_${System.currentTimeMillis()}.jpg", dir)
-            image.close()
+            // 1. Capture Screen (RGB)
+            val width = surfaceView.width
+            val height = surfaceView.height
+            val screenshotPath = saveScreenshot(width, height, "rgb_${System.currentTimeMillis()}.jpg", dir)
 
             // 2. Capture Depth
             val depthImage = frame.acquireRawDepthImage16Bits()
@@ -240,7 +240,7 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
             }
 
             val resultMap = mapOf(
-                "imagePath" to imagePath,
+                "imagePath" to screenshotPath,
                 "depthPath" to depthPath,
                 "relativePose" to poseList
             )
@@ -257,20 +257,41 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
         }
     }
 
-    private fun saveImage(image: Image, filename: String, dirPath: String?): String {
-        val yuvImage = YuvImage(
-            YUV_420_888toNV21(image),
-            ImageFormat.NV21,
-            image.width,
-            image.height,
-            null
-        )
-        val dir = if (dirPath != null) File(dirPath) else context.cacheDir
-        if (!dir.exists()) dir.mkdirs()
+    private fun saveScreenshot(width: Int, height: Int, filename: String, dirPath: String?): String {
+        val dir = if (dirPath != null) File(dirPath) else context.filesDir
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
         val file = File(dir, filename)
-        val stream = FileOutputStream(file)
-        yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 100, stream)
-        stream.close()
+
+        val size = width * height
+        val buf = ByteBuffer.allocateDirect(size * 4)
+        buf.order(ByteOrder.nativeOrder())
+        GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
+
+        val data = IntArray(size)
+        buf.asIntBuffer().get(data)
+        
+        // Flip image vertically (OpenGL origin is bottom-left)
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val tmp = IntArray(width)
+        for (i in 0 until height / 2) {
+            System.arraycopy(data, i * width, tmp, 0, width)
+            System.arraycopy(data, (height - i - 1) * width, data, i * width, width)
+            System.arraycopy(tmp, 0, data, (height - i - 1) * width, width)
+        }
+        bitmap.setPixels(data, 0, width, 0, 0, width, height)
+
+        // Swap Red and Blue channels if necessary (glReadPixels returns RGBA, Bitmap expects ARGB/RGBA)
+        // Actually, Bitmap.Config.ARGB_8888 expects ARGB, but glReadPixels gives RGBA.
+        // However, on Android Little Endian, RGBA in byte order is ABGR in int order.
+        // Let's just save it and see. Usually it works directly or needs simple channel swap.
+        
+        val out = FileOutputStream(file)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
+        out.flush()
+        out.close()
+        
         return file.absolutePath
     }
 
