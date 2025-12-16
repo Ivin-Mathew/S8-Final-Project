@@ -1,2 +1,11 @@
 model/midas_v21_small_256.pt
 model/__pycache__/
+.venv
+
+#Unused folders from flutter
+linux
+macos
+ios
+
+#AR image outputs
+visualizations/session_*
