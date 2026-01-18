@@ -71,7 +71,6 @@ class HomeScreen extends StatelessWidget {
                     icon: DepthEstimationModule.moduleIcon,
                     color: Colors.orange,
                     onTap: () => DepthEstimationModule.launch(context),
-                    isEnabled: false,
                   ),
                   _buildModuleCard(
                     context,
@@ -80,7 +79,6 @@ class HomeScreen extends StatelessWidget {
                     icon: ThreeDViewerModule.moduleIcon,
                     color: Colors.green,
                     onTap: () => ThreeDViewerModule.launch(context),
-                    isEnabled: false,
                   ),
                   _buildModuleCard(
                     context,
