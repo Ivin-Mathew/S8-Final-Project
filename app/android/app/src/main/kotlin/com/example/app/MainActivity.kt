@@ -282,13 +282,24 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
         }
         bitmap.setPixels(data, 0, width, 0, 0, width, height)
 
-        // Swap Red and Blue channels if necessary (glReadPixels returns RGBA, Bitmap expects ARGB/RGBA)
-        // Actually, Bitmap.Config.ARGB_8888 expects ARGB, but glReadPixels gives RGBA.
-        // However, on Android Little Endian, RGBA in byte order is ABGR in int order.
-        // Let's just save it and see. Usually it works directly or needs simple channel swap.
+        // Fix color channels: glReadPixels returns RGBA, but we need ARGB
+        // Swap R and B channels
+        val pixels = IntArray(size)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
+            // RGBA to ARGB: swap red and blue
+            val a = (pixel shr 24) and 0xFF
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            pixels[i] = (a shl 24) or (b shl 16) or (g shl 8) or r
+        }
+        val correctedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        correctedBitmap.setPixels(pixels, 0, width, 0, 0, width, height)
         
         val out = FileOutputStream(file)
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
+        correctedBitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
         out.flush()
         out.close()
         
