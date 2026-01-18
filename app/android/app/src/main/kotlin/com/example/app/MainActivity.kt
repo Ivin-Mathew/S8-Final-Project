@@ -73,6 +73,7 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
     private var shouldCapture = false
     private var captureDir: String? = null
     private var captureResult: MethodChannel.Result? = null
+    private var hideAnchor = false
     private val methodChannel: MethodChannel
 
     init {
@@ -168,7 +169,7 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
             val viewMatrix = FloatArray(16)
             camera.getViewMatrix(viewMatrix, 0)
 
-            if (currentAnchor != null) {
+            if (currentAnchor != null && !hideAnchor) {
                 val anchorMatrix = FloatArray(16)
                 currentAnchor!!.pose.toMatrix(anchorMatrix, 0)
                 objectRenderer.draw(viewMatrix, projectionMatrix, anchorMatrix)
@@ -211,11 +212,17 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
 
     private fun handleCapture(frame: Frame) {
         shouldCapture = false
+        hideAnchor = true // Hide anchor before screenshot
+        
         val result = captureResult ?: return
         captureResult = null
         val dir = captureDir
 
         try {
+            // Force a re-render without the anchor
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
+            backgroundRenderer.draw(frame)
+            
             // 1. Capture Screen (RGB)
             val width = surfaceView.width
             val height = surfaceView.height
@@ -254,6 +261,8 @@ class NativeArView(private val context: Context, private val flutterEngine: Flut
             activity.runOnUiThread {
                 result.error("CAPTURE_FAILED", e.message, null)
             }
+        } finally {
+            hideAnchor = false // Show anchor again after capture
         }
     }
 
