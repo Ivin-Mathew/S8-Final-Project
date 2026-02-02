@@ -4,6 +4,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:archive/archive_io.dart';
 import 'package:intl/intl.dart';
+import 'utils/session_metadata.dart';
 
 class GalleryScreen extends StatefulWidget {
   const GalleryScreen({super.key});
@@ -33,6 +34,115 @@ class _GalleryScreenState extends State<GalleryScreen> {
     setState(() {
       _loading = false;
     });
+  }
+
+  Future<int> _countImagesInSession(Directory dir) async {
+    try {
+      if (!await dir.exists()) return 0;
+      final files = dir.listSync().where((e) => e.path.endsWith('.jpg')).toList();
+      return files.length;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  Future<void> _renameSession(Directory sessionDir) async {
+    final currentAlias = await SessionMetadata.getSessionAlias(sessionDir);
+    final controller = TextEditingController(text: currentAlias);
+    
+    if (!mounted) return;
+    final newAlias = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename Session'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Original: ${sessionDir.path.split(Platform.pathSeparator).last}',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: 'Display Name',
+                hintText: 'Enter custom name',
+              ),
+              autofocus: true,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    
+    if (newAlias != null && newAlias.isNotEmpty) {
+      try {
+        await SessionMetadata.setSessionAlias(sessionDir, newAlias);
+        if (!mounted) return;
+        setState(() {}); // Refresh the list
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Session name updated successfully')),
+        );
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to update name: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteSession(Directory sessionDir) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Session'),
+        content: const Text('Are you sure you want to delete this session? This action cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    
+    if (confirmed == true) {
+      try {
+        await sessionDir.delete(recursive: true);
+        await _loadSessions();
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Session deleted successfully')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to delete: $e')),
+          );
+        }
+      }
+    }
   }
 
   Future<void> _exportSession(Directory sessionDir) async {
@@ -115,6 +225,7 @@ for capture in data:
       // Write to disk
       await zipFile.writeAsBytes(zipBytes);
 
+      // ignore: deprecated_member_use
       await Share.shareXFiles([XFile(zipFile.path)], text: 'Export Session Data');
     } catch (e) {
       if (mounted) {
@@ -142,17 +253,38 @@ for capture in data:
                         int.tryParse(name.split('_').last) ?? 0);
                     final formattedDate = DateFormat('yyyy-MM-dd HH:mm').format(date);
                     
-                    return ListTile(
-                      title: Text('Session: $formattedDate'),
-                      subtitle: FutureBuilder<int>(
-                        future: dir.list().length.then((_) => dir.listSync().where((e) => e.path.endsWith('.jpg')).length),
-                        builder: (context, snapshot) {
-                          return Text('${snapshot.data ?? 0} images');
-                        },
-                      ),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.share),
-                        onPressed: () => _exportSession(dir),
+                    return FutureBuilder<String>(
+                      future: SessionMetadata.getSessionAlias(dir),
+                      builder: (context, aliasSnapshot) {
+                        final displayName = aliasSnapshot.data ?? name;
+                        
+                        return ListTile(
+                          title: Text(displayName),
+                          subtitle: FutureBuilder<int>(
+                            future: _countImagesInSession(dir),
+                            builder: (context, snapshot) {
+                              return Text('${snapshot.data ?? 0} images • $formattedDate');
+                            },
+                          ),
+                          trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.edit),
+                            onPressed: () => _renameSession(dir),
+                            tooltip: 'Rename',
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.share),
+                            onPressed: () => _exportSession(dir),
+                            tooltip: 'Export',
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () => _deleteSession(dir),
+                            tooltip: 'Delete',
+                          ),
+                        ],
                       ),
                       onTap: () {
                         Navigator.push(
@@ -161,6 +293,8 @@ for capture in data:
                             builder: (context) => SessionDetailScreen(sessionDir: dir),
                           ),
                         );
+                      },
+                    );
                       },
                     );
                   },
@@ -176,23 +310,45 @@ class SessionDetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final files = sessionDir.listSync()
-        .where((e) => e.path.endsWith('.jpg'))
-        .toList();
+    List<File> files = [];
+    try {
+      files = sessionDir.listSync()
+          .where((e) => e.path.endsWith('.jpg'))
+          .cast<File>()
+          .toList();
+    } catch (e) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Session Images')),
+        body: Center(
+          child: Text('Error loading images: $e'),
+        ),
+      );
+    }
 
     return Scaffold(
       appBar: AppBar(title: const Text('Session Images')),
-      body: GridView.builder(
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 3,
-          crossAxisSpacing: 4,
-          mainAxisSpacing: 4,
-        ),
-        itemCount: files.length,
-        itemBuilder: (context, index) {
-          return Image.file(files[index] as File, fit: BoxFit.cover);
-        },
-      ),
+      body: files.isEmpty
+          ? const Center(child: Text('No images found in this session'))
+          : GridView.builder(
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 4,
+                mainAxisSpacing: 4,
+              ),
+              itemCount: files.length,
+              itemBuilder: (context, index) {
+                return Image.file(
+                  files[index],
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) {
+                    return Container(
+                      color: Colors.grey[300],
+                      child: const Icon(Icons.broken_image),
+                    );
+                  },
+                );
+              },
+            ),
     );
   }
 }

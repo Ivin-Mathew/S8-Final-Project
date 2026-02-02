@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import 'dart:convert';
 import 'package:image/image.dart' as img;
 import 'dart:math' as math;
+import 'utils/session_metadata.dart';
 
 class PointCloudViewerScreen extends StatefulWidget {
   const PointCloudViewerScreen({super.key});
@@ -47,6 +48,106 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
     });
   }
 
+  Future<void> _renameSession(Directory sessionDir) async {
+    final currentAlias = await SessionMetadata.getSessionAlias(sessionDir);
+    final controller = TextEditingController(text: currentAlias);
+    
+    if (!mounted) return;
+    final newAlias = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename Session'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Original: ${sessionDir.path.split(Platform.pathSeparator).last}',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: 'Display Name',
+                hintText: 'Enter custom name',
+              ),
+              autofocus: true,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    
+    if (newAlias != null && newAlias.isNotEmpty) {
+      try {
+        await SessionMetadata.setSessionAlias(sessionDir, newAlias);
+        if (!mounted) return;
+        setState(() {}); // Refresh the list
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Session name updated successfully')),
+        );
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to update name: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteSession(Directory sessionDir) async {
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Session'),
+        content: const Text('Are you sure you want to delete this session? This action cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    
+    if (confirmed == true) {
+      try {
+        await sessionDir.delete(recursive: true);
+        await _loadSessions();
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Session deleted successfully')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to delete: $e')),
+          );
+        }
+      }
+    }
+  }
+
   Future<void> _loadCapturesFromSession(Directory session) async {
     setState(() {
       _selectedSession = session;
@@ -59,8 +160,24 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
     if (await jsonFile.exists()) {
       final jsonContent = await jsonFile.readAsString();
       final List<dynamic> data = json.decode(jsonContent);
+      
+      // Reconstruct paths based on current session directory
+      final fixedCaptures = data.map((capture) {
+        final captureMap = Map<String, dynamic>.from(capture);
+        
+        // Extract just the filename from the stored paths
+        final imageFilename = captureMap['imagePath'].toString().split('/').last.split('\\').last;
+        final depthFilename = captureMap['depthPath'].toString().split('/').last.split('\\').last;
+        
+        // Reconstruct full paths based on current session directory
+        captureMap['imagePath'] = '${session.path}/$imageFilename';
+        captureMap['depthPath'] = '${session.path}/$depthFilename';
+        
+        return captureMap;
+      }).toList();
+      
       setState(() {
-        _captures = data.cast<Map<String, dynamic>>();
+        _captures = fixedCaptures;
       });
     }
   }
@@ -174,6 +291,7 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
       setState(() {
         _statusMessage = 'Error: $e';
       });
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error generating point cloud: $e')),
       );
@@ -199,10 +317,29 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
                 itemBuilder: (context, index) {
                   final session = _sessions[index];
                   final sessionName = session.path.split('/').last;
-                  return ListTile(
-                    leading: const Icon(Icons.folder),
-                    title: Text(sessionName),
-                    onTap: () => _loadCapturesFromSession(session),
+                  return FutureBuilder<String>(
+                    future: SessionMetadata.getSessionAlias(session),
+                    builder: (context, snapshot) {
+                      final displayName = snapshot.data ?? sessionName;
+                      return ListTile(
+                        leading: const Icon(Icons.folder),
+                        title: Text(displayName),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.edit),
+                              onPressed: () => _renameSession(session),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.red),
+                              onPressed: () => _deleteSession(session),
+                            ),
+                          ],
+                        ),
+                        onTap: () => _loadCapturesFromSession(session),
+                      );
+                    },
                   );
                 },
               ),
