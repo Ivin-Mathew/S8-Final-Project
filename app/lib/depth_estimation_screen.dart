@@ -172,10 +172,34 @@ class _DepthEstimationScreenState extends State<DepthEstimationScreen> {
       
       final depthBytes = await _runDepthEstimation(imagePath);
       
+      // Save enhanced depth map as binary file
+      final depthFilename = capture['depthPath'].split('/').last;
+      final frameNumber = depthFilename.replaceAll(RegExp(r'[^0-9]'), '');
+      final sessionDir = _selectedSession!.path;
+      final enhancedDepthPath = '$sessionDir/enhanced_depth_$frameNumber.raw';
+      
+      // Convert PNG back to 16-bit depth data for 3D viewer
+      final depthImage = img.decodeImage(depthBytes);
+      if (depthImage != null) {
+        // Convert grayscale to depth values (scale from 0-255 to 0-5000mm)
+        final depthData = Uint16List(depthImage.width * depthImage.height);
+        for (int i = 0; i < depthData.length; i++) {
+          final pixel = depthImage.getPixel(i % depthImage.width, i ~/ depthImage.width);
+          // Map brightness to depth (darker = farther, lighter = closer)
+          // Invert so closer objects have higher values
+          final normalized = (255 - pixel.r.toInt()) / 255.0;
+          depthData[i] = (normalized * 5000).toInt(); // Scale to 0-5000mm
+        }
+        
+        // Save as binary file
+        final file = File(enhancedDepthPath);
+        await file.writeAsBytes(depthData.buffer.asUint8List());
+      }
+      
       setState(() {
         _depthMapImage = depthBytes;
         _processing = false;
-        _statusMessage = 'Depth estimation complete for image ${_currentIndex + 1}';
+        _statusMessage = 'Depth estimation complete for image ${_currentIndex + 1}\nSaved to: enhanced_depth_$frameNumber.raw';
       });
     } catch (e) {
       setState(() {
