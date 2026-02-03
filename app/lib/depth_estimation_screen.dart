@@ -258,7 +258,8 @@ class _DepthEstimationScreenState extends State<DepthEstimationScreen> {
 
     final range = maxVal - minVal;
     
-    // Create grayscale depth image
+    // Create grayscale depth image at native 256x256 resolution
+    // Do NOT resize - preserving native MiDaS resolution prevents interpolation artifacts
     final depthImage = img.Image(width: 256, height: 256);
     for (int y = 0; y < 256; y++) {
       for (int x = 0; x < 256; x++) {
@@ -267,11 +268,8 @@ class _DepthEstimationScreenState extends State<DepthEstimationScreen> {
         depthImage.setPixel(x, y, pixel);
       }
     }
-
-    // Resize back to original image size
-    final resizedDepth = img.copyResize(depthImage, width: image.width, height: image.height);
     
-    return Uint8List.fromList(img.encodePng(resizedDepth));
+    return Uint8List.fromList(img.encodePng(depthImage));
   }
 
   Future<void> _processCurrentImage() async {
@@ -295,21 +293,33 @@ class _DepthEstimationScreenState extends State<DepthEstimationScreen> {
       final enhancedDepthPath = '$sessionDir/enhanced_depth_$frameNumber.raw';
       
       // Convert PNG back to 16-bit depth data for 3D viewer
+      // Depth is at native MiDaS resolution (256x256) - NOT resized
       final depthImage = img.decodeImage(depthBytes);
       if (depthImage != null) {
-        // Convert grayscale to depth values (scale from 0-255 to 0-5000mm)
-        final depthData = Uint16List(depthImage.width * depthImage.height);
+        final depthWidth = depthImage.width;   // Should be 256
+        final depthHeight = depthImage.height; // Should be 256
+        
+        // MiDaS outputs inverse depth: brighter pixels = closer objects
+        // Save directly without inversion: higher uint16 = closer
+        final depthData = Uint16List(depthWidth * depthHeight);
         for (int i = 0; i < depthData.length; i++) {
-          final pixel = depthImage.getPixel(i % depthImage.width, i ~/ depthImage.width);
-          // Map brightness to depth (darker = farther, lighter = closer)
-          // Invert so closer objects have higher values
-          final normalized = (255 - pixel.r.toInt()) / 255.0;
-          depthData[i] = (normalized * 5000).toInt(); // Scale to 0-5000mm
+          final pixel = depthImage.getPixel(i % depthWidth, i ~/ depthWidth);
+          // Preserve MiDaS semantics: brightness (0-255) -> depth value (0-65535)
+          // Higher value = closer object
+          depthData[i] = (pixel.r.toInt() * 256);
         }
         
-        // Save as binary file
+        // Save as binary file with header containing dimensions
+        // Format: [width:4 bytes][height:4 bytes][depth data:width*height*2 bytes]
+        final headerBuffer = ByteData(8);
+        headerBuffer.setUint32(0, depthWidth, Endian.little);
+        headerBuffer.setUint32(4, depthHeight, Endian.little);
+        
         final file = File(enhancedDepthPath);
-        await file.writeAsBytes(depthData.buffer.asUint8List());
+        final outputBytes = Uint8List(8 + depthData.length * 2);
+        outputBytes.setRange(0, 8, headerBuffer.buffer.asUint8List());
+        outputBytes.setRange(8, outputBytes.length, depthData.buffer.asUint8List());
+        await file.writeAsBytes(outputBytes);
       }
       
       setState(() {

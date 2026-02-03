@@ -6,7 +6,6 @@ import 'dart:convert';
 import 'package:image/image.dart' as img;
 import 'dart:math' as math;
 import 'utils/session_metadata.dart';
-import 'utils/point_cloud_filter.dart';
 
 class PointCloudViewerScreen extends StatefulWidget {
   const PointCloudViewerScreen({super.key});
@@ -27,8 +26,9 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
   double _zoom = 1.0;
   double _offsetX = 0.0;
   double _offsetY = 0.0;
+  double _panX = 0.0;
+  double _panY = 0.0;
   bool _useMidasDepth = false;
-  FilterMode _filterMode = FilterMode.none;
   String? _statusMessage;
 
   @override
@@ -187,15 +187,49 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
   Future<void> _generatePointCloud() async {
     if (_captures.isEmpty || _currentIndex >= _captures.length) return;
 
+    final capture = _captures[_currentIndex];
+    final imagePath = capture['imagePath'];
+    final depthPath = capture['depthPath'];
+
+    // Check if MiDaS depth exists when requested
+    if (_useMidasDepth) {
+      final sessionDir = _selectedSession!.path;
+      final depthFilename = depthPath.split('/').last;
+      final frameNumber = depthFilename.replaceAll(RegExp(r'[^0-9]'), '');
+      final midasDepthPath = '$sessionDir/enhanced_depth_$frameNumber.raw';
+      
+      if (!await File(midasDepthPath).exists()) {
+        if (!mounted) return;
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('MiDaS Depth Not Available'),
+            content: const Text(
+              'MiDaS depth map has not been generated for this image.\\n\\n'
+              'Please go to Depth Estimation screen and process this image first, '
+              'then return here to generate the 3D point cloud.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+        setState(() {
+          _statusMessage = 'MiDaS depth not available - process image first';
+        });
+        return;
+      }
+    }
+
     setState(() {
       _pointCloud = null;
       _statusMessage = 'Generating 3D point cloud...';
     });
 
     try {
-      final capture = _captures[_currentIndex];
-      final imagePath = capture['imagePath'];
-      final depthPath = capture['depthPath'];
       
       double minDepth = double.infinity;
       double maxDepth = 0.0;
@@ -224,14 +258,71 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
 
       // Load depth data
       Uint16List depthData;
-      int depthWidth, depthHeight;
+      int depthWidth = 256;  // Default for MiDaS
+      int depthHeight = 256;
       
       if (usingMidas) {
-        // MiDaS depth (256x256)
+        // MiDaS depth - read dimensions from file header
+        // Format: [width:4 bytes][height:4 bytes][depth data:width*height*2 bytes]
         final depthBytes = await File(actualDepthPath).readAsBytes();
-        depthData = depthBytes.buffer.asUint16List();
-        depthWidth = 256;
-        depthHeight = 256;
+        
+        // Check if file has header (new format) or is legacy (no header)
+        // New format has header, legacy format was assumed 256x256
+        if (depthBytes.length > 8) {
+          final header = ByteData.sublistView(depthBytes, 0, 8);
+          final headerWidth = header.getUint32(0, Endian.little);
+          final headerHeight = header.getUint32(4, Endian.little);
+          
+          // Validate header - if dimensions make sense with file size, use them
+          final expectedSize = 8 + headerWidth * headerHeight * 2;
+          if (headerWidth > 0 && headerWidth <= 4096 && 
+              headerHeight > 0 && headerHeight <= 4096 &&
+              depthBytes.length == expectedSize) {
+            // New format with header
+            depthWidth = headerWidth;
+            depthHeight = headerHeight;
+            depthData = depthBytes.buffer.asUint16List(8); // Skip 8-byte header
+          } else {
+            // Legacy format without header - try to infer dimensions
+            // Legacy files might have been saved at resized resolution
+            final totalPixels = depthBytes.length ~/ 2;
+            depthData = depthBytes.buffer.asUint16List();
+            
+            // Check for common resolutions
+            if (totalPixels == 256 * 256) {
+              depthWidth = 256;
+              depthHeight = 256;
+            } else {
+              // Try to find valid dimensions (assume roughly square aspect)
+              final sqrtVal = math.sqrt(totalPixels).round();
+              if (sqrtVal * sqrtVal == totalPixels) {
+                depthWidth = sqrtVal;
+                depthHeight = sqrtVal;
+              } else {
+                // Try common aspect ratios (16:9, 4:3)
+                bool found = false;
+                for (final ratio in [(16, 9), (4, 3), (3, 2)]) {
+                  final w = math.sqrt(totalPixels * ratio.$1 / ratio.$2).round();
+                  final h = (w * ratio.$2 / ratio.$1).round();
+                  if (w * h == totalPixels) {
+                    depthWidth = w;
+                    depthHeight = h;
+                    found = true;
+                    break;
+                  }
+                }
+                // Fallback to 256x256 if nothing matches
+                if (!found) {
+                  depthWidth = 256;
+                  depthHeight = 256;
+                }
+              }
+            }
+          }
+        } else {
+          // Very small file - shouldn't happen
+          throw Exception('Invalid depth file format');
+        }
       } else {
         // ARCore depth (160x90)
         final depthBytes = await File(actualDepthPath).readAsBytes();
@@ -242,20 +333,8 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
 
       final points = <Point3D>[];
       
-      // Apply object filtering mask
-      Uint8List? filterMask;
-      if (_filterMode != FilterMode.none) {
-        filterMask = PointCloudFilter.depthBasedMask(
-          depthData,
-          depthWidth,
-          depthHeight,
-          mode: _filterMode,
-        );
-      }
-      
-      // Normalize MiDaS depth to reasonable metric scale
+      // Find depth range for normalization
       if (usingMidas) {
-        // Find actual depth range in MiDaS data
         for (int i = 0; i < depthData.length; i++) {
           if (depthData[i] > 0) {
             final d = depthData[i].toDouble();
@@ -275,33 +354,23 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
 
       // Downsample for performance (every Nth pixel)
       final step = usingMidas ? 2 : 1;
-      
-      int filteredCount = 0;
-      int totalCount = 0;
 
       // Generate point cloud
       for (int y = 0; y < depthHeight; y += step) {
         for (int x = 0; x < depthWidth; x += step) {
           final depthIndex = y * depthWidth + x;
           if (depthIndex >= depthData.length) continue;
-          
-          totalCount++;
-
-          // Check filter mask
-          if (filterMask != null && filterMask[depthIndex] == 0) {
-            filteredCount++;
-            continue;
-          }
 
           final depthValue = depthData[depthIndex];
           if (depthValue == 0) continue;
 
           double z;
           if (usingMidas) {
-            // MiDaS: normalize relative depth to metric scale (0.5m to 3m range)
-            // Invert because MiDaS saves closer objects with higher values
-            final normalizedDepth = (maxDepth - depthValue.toDouble()) / (maxDepth - minDepth);
-            z = 0.5 + normalizedDepth * 2.5; // Map to 0.5m - 3.0m range
+            // MiDaS saved format: higher uint16 values = closer objects
+            // Normalize to 0-1 (1 = closest)
+            final normalizedDepth = (depthValue.toDouble() - minDepth) / (maxDepth - minDepth);
+            // Convert to metric depth: high value -> small z (close), low value -> large z (far)
+            z = 3.0 - (normalizedDepth * 2.5); // Maps to 0.5m (close) to 3.0m (far)
           } else {
             // ARCore: already in millimeters
             z = depthValue / 1000.0;
@@ -334,13 +403,10 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
 
       setState(() {
         _pointCloud = points;
-        final filterInfo = _filterMode != FilterMode.none 
-            ? ' | Filtered: ${filteredCount}/${totalCount} points removed'
-            : '';
         final depthInfo = usingMidas && minDepth != double.infinity 
-            ? ' | Range: ${(minDepth/1000).toStringAsFixed(2)}-${(maxDepth/1000).toStringAsFixed(2)}m'
+            ? ' | Range: ${(minDepth/256/1000).toStringAsFixed(2)}-${(maxDepth/256/1000).toStringAsFixed(2)}m'
             : '';
-        _statusMessage = '${points.length} points | ${usingMidas ? "MiDaS" : "ARCore"} depth$depthInfo$filterInfo';
+        _statusMessage = '${points.length} points | ${usingMidas ? "MiDaS" : "ARCore"} depth$depthInfo';
       });
     } catch (e) {
       setState(() {
@@ -455,64 +521,43 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
                                 ],
                               ),
                               const SizedBox(height: 8),
-                              // Object filtering dropdown
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 32),
-                                child: Column(
-                                  children: [
-                                    const Text('Object Filtering:'),
-                                    const SizedBox(height: 8),
-                                    DropdownButton<FilterMode>(
-                                      value: _filterMode,
-                                      isExpanded: true,
-                                      items: const [
-                                        DropdownMenuItem(
-                                          value: FilterMode.none,
-                                          child: Text('None (All points)'),
-                                        ),
-                                        DropdownMenuItem(
-                                          value: FilterMode.autoForeground,
-                                          child: Text('Auto Foreground'),
-                                        ),
-                                        DropdownMenuItem(
-                                          value: FilterMode.centerObject,
-                                          child: Text('Center Object'),
-                                        ),
-                                        DropdownMenuItem(
-                                          value: FilterMode.depthRange,
-                                          child: Text('Depth Range (< 2m)'),
-                                        ),
-                                      ],
-                                      onChanged: (value) {
-                                        setState(() {
-                                          _filterMode = value!;
-                                          _pointCloud = null;
-                                        });
-                                      },
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              if (_useMidasDepth)
-                                const Padding(
-                                  padding: EdgeInsets.all(8.0),
+                              if (_statusMessage != null)
+                                Padding(
+                                  padding: const EdgeInsets.all(8.0),
                                   child: Text(
-                                    'Note: Process image in Depth Estimation first',
-                                    style: TextStyle(fontSize: 12, color: Colors.orange),
+                                    _statusMessage!,
+                                    style: const TextStyle(color: Colors.grey),
                                   ),
                                 ),
                             ],
                           ),
                         )
                       : GestureDetector(
-                          onPanUpdate: (details) {
+                          onScaleStart: (details) {
                             setState(() {
-                              _rotationY += details.delta.dx * 0.01;
-                              _rotationX += details.delta.dy * 0.01;
+                              _offsetX = 0.0;
+                              _offsetY = 0.0;
                             });
                           },
-                          onPanEnd: (details) {
-                            // Add momentum/inertia effect if needed
+                          onScaleUpdate: (details) {
+                            setState(() {
+                              if (details.scale != 1.0) {
+                                // Pinch to zoom
+                                _zoom *= details.scale;
+                                _zoom = _zoom.clamp(0.1, 10.0);
+                              }
+                              
+                              // Single finger drag for rotation, two-finger drag for pan
+                              if (details.pointerCount == 1) {
+                                // Rotation with single finger
+                                _rotationY += details.focalPointDelta.dx * 0.01;
+                                _rotationX += details.focalPointDelta.dy * 0.01;
+                              } else if (details.pointerCount == 2) {
+                                // Pan with two fingers
+                                _panX += details.focalPointDelta.dx / 100;
+                                _panY += details.focalPointDelta.dy / 100;
+                              }
+                            });
                           },
                           child: CustomPaint(
                             painter: PointCloudPainter(
@@ -520,8 +565,8 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
                               rotationX: _rotationX,
                               rotationY: _rotationY,
                               zoom: _zoom,
-                              offsetX: _offsetX,
-                              offsetY: _offsetY,
+                              offsetX: _offsetX + _panX * 100,
+                              offsetY: _offsetY + _panY * 100,
                             ),
                             size: Size.infinite,
                           ),
@@ -582,6 +627,8 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
                                       _zoom = 1.0;
                                       _offsetX = 0.0;
                                       _offsetY = 0.0;
+                                      _panX = 0.0;
+                                      _panY = 0.0;
                                     });
                                   },
                                   style: ElevatedButton.styleFrom(
