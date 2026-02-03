@@ -196,6 +196,9 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
       final capture = _captures[_currentIndex];
       final imagePath = capture['imagePath'];
       final depthPath = capture['depthPath'];
+      
+      double minDepth = double.infinity;
+      double maxDepth = 0.0;
 
       // Check if MiDaS enhanced depth exists
       final sessionDir = _selectedSession!.path;
@@ -250,9 +253,23 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
         );
       }
       
-      // Camera intrinsics
-      final fx = depthWidth / 2.0;
-      final fy = depthHeight / 2.0;
+      // Normalize MiDaS depth to reasonable metric scale
+      if (usingMidas) {
+        // Find actual depth range in MiDaS data
+        for (int i = 0; i < depthData.length; i++) {
+          if (depthData[i] > 0) {
+            final d = depthData[i].toDouble();
+            if (d < minDepth) minDepth = d;
+            if (d > maxDepth) maxDepth = d;
+          }
+        }
+      }
+      
+      // Camera intrinsics (adjust FOV for more accurate projection)
+      // Using ~60 degree horizontal FOV (typical mobile camera)
+      final fovH = 60.0 * math.pi / 180.0; // radians
+      final fx = depthWidth / (2.0 * math.tan(fovH / 2.0));
+      final fy = fx; // Assume square pixels
       final cx = depthWidth / 2.0;
       final cy = depthHeight / 2.0;
 
@@ -279,17 +296,25 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
           final depthValue = depthData[depthIndex];
           if (depthValue == 0) continue;
 
-          // Convert depth from millimeters to meters
-          final z = depthValue / 1000.0;
+          double z;
+          if (usingMidas) {
+            // MiDaS: normalize relative depth to metric scale (0.5m to 3m range)
+            // Invert because MiDaS saves closer objects with higher values
+            final normalizedDepth = (maxDepth - depthValue.toDouble()) / (maxDepth - minDepth);
+            z = 0.5 + normalizedDepth * 2.5; // Map to 0.5m - 3.0m range
+          } else {
+            // ARCore: already in millimeters
+            z = depthValue / 1000.0;
+          }
           
           // Skip if depth is too far or too close
           if (z < 0.1 || z > 5.0) continue;
 
-          // Back-project to 3D
+          // Back-project to 3D using proper camera model
           final xPos = (x - cx) * z / fx;
           final yPos = (y - cy) * z / fy;
 
-          // Get RGB color
+          // Get RGB color - match depth pixel to RGB pixel
           final imgX = (x * rgbImage.width / depthWidth).floor();
           final imgY = (y * rgbImage.height / depthHeight).floor();
           
@@ -312,7 +337,10 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
         final filterInfo = _filterMode != FilterMode.none 
             ? ' | Filtered: ${filteredCount}/${totalCount} points removed'
             : '';
-        _statusMessage = '${points.length} points | ${usingMidas ? "MiDaS" : "ARCore"} depth$filterInfo';
+        final depthInfo = usingMidas && minDepth != double.infinity 
+            ? ' | Range: ${(minDepth/1000).toStringAsFixed(2)}-${(maxDepth/1000).toStringAsFixed(2)}m'
+            : '';
+        _statusMessage = '${points.length} points | ${usingMidas ? "MiDaS" : "ARCore"} depth$depthInfo$filterInfo';
       });
     } catch (e) {
       setState(() {
