@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:image/image.dart' as img;
 import 'dart:math' as math;
 import 'utils/session_metadata.dart';
+import 'utils/point_cloud_filter.dart';
 
 class PointCloudViewerScreen extends StatefulWidget {
   const PointCloudViewerScreen({super.key});
@@ -27,6 +28,7 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
   double _offsetX = 0.0;
   double _offsetY = 0.0;
   bool _useMidasDepth = false;
+  FilterMode _filterMode = FilterMode.none;
   String? _statusMessage;
 
   @override
@@ -237,6 +239,17 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
 
       final points = <Point3D>[];
       
+      // Apply object filtering mask
+      Uint8List? filterMask;
+      if (_filterMode != FilterMode.none) {
+        filterMask = PointCloudFilter.depthBasedMask(
+          depthData,
+          depthWidth,
+          depthHeight,
+          mode: _filterMode,
+        );
+      }
+      
       // Camera intrinsics
       final fx = depthWidth / 2.0;
       final fy = depthHeight / 2.0;
@@ -245,12 +258,23 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
 
       // Downsample for performance (every Nth pixel)
       final step = usingMidas ? 2 : 1;
+      
+      int filteredCount = 0;
+      int totalCount = 0;
 
       // Generate point cloud
       for (int y = 0; y < depthHeight; y += step) {
         for (int x = 0; x < depthWidth; x += step) {
           final depthIndex = y * depthWidth + x;
           if (depthIndex >= depthData.length) continue;
+          
+          totalCount++;
+
+          // Check filter mask
+          if (filterMask != null && filterMask[depthIndex] == 0) {
+            filteredCount++;
+            continue;
+          }
 
           final depthValue = depthData[depthIndex];
           if (depthValue == 0) continue;
@@ -285,7 +309,10 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
 
       setState(() {
         _pointCloud = points;
-        _statusMessage = '${points.length} points | ${usingMidas ? "MiDaS" : "ARCore"} depth';
+        final filterInfo = _filterMode != FilterMode.none 
+            ? ' | Filtered: ${filteredCount}/${totalCount} points removed'
+            : '';
+        _statusMessage = '${points.length} points | ${usingMidas ? "MiDaS" : "ARCore"} depth$filterInfo';
       });
     } catch (e) {
       setState(() {
@@ -398,6 +425,45 @@ class _PointCloudViewerScreenState extends State<PointCloudViewerScreen> {
                                     },
                                   ),
                                 ],
+                              ),
+                              const SizedBox(height: 8),
+                              // Object filtering dropdown
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 32),
+                                child: Column(
+                                  children: [
+                                    const Text('Object Filtering:'),
+                                    const SizedBox(height: 8),
+                                    DropdownButton<FilterMode>(
+                                      value: _filterMode,
+                                      isExpanded: true,
+                                      items: const [
+                                        DropdownMenuItem(
+                                          value: FilterMode.none,
+                                          child: Text('None (All points)'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: FilterMode.autoForeground,
+                                          child: Text('Auto Foreground'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: FilterMode.centerObject,
+                                          child: Text('Center Object'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: FilterMode.depthRange,
+                                          child: Text('Depth Range (< 2m)'),
+                                        ),
+                                      ],
+                                      onChanged: (value) {
+                                        setState(() {
+                                          _filterMode = value!;
+                                          _pointCloud = null;
+                                        });
+                                      },
+                                    ),
+                                  ],
+                                ),
                               ),
                               if (_useMidasDepth)
                                 const Padding(
